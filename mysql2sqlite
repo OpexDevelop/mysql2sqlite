@@ -1,11 +1,13 @@
 #!/usr/bin/awk -f
 
 BEGIN {
+    IGNORECASE = 1;
+    
     if (ARGC != 2) {
-        print "❌ Error: Specify the MySQL dump file." > "/dev/stderr"
+        print "❌ Error: Specify MySQL dump file as the first argument." > "/dev/stderr"
         print "Usage: mysql2sqlite dump.sql" > "/dev/stderr"
-        no_END = 1 
-        exit 1     
+        no_END = 1
+        exit 1
     }
 
     print "PRAGMA synchronous = OFF;"
@@ -14,7 +16,6 @@ BEGIN {
     print "BEGIN TRANSACTION;"
 }
 
-
 /^\/\*/ { next }
 /^--/ { next }
 /^SET / { next }
@@ -22,7 +23,7 @@ BEGIN {
 /^UNLOCK TABLES/ { next }
 /^(CREATE DATABASE|create database)/ { next }
 
-/^(INSERT|REPLACE|insert|replace) / {
+/^(INSERT|REPLACE) / {
     gsub(/\\\\/, "\\_")
     gsub(/\\'/, "''")
     gsub(/\\n/, "\n")
@@ -56,9 +57,9 @@ BEGIN {
 inAlterTable != 0 {
     alterStatement = alterStatement " " $0
     
-    if (/ADD INDEX|add index/) {
+    if (/ADD INDEX/) {
         isAddIndex = 1
-        if (match($0, /(ADD INDEX|add index) `[^`]+/)) {
+        if (match($0, /ADD INDEX `[^`]+/)) {
             indexMatch = substr($0, RSTART, RLENGTH)
             if (match(indexMatch, /`[^`]+$/)) {
                 alterIndexName = substr(indexMatch, RSTART+1, RLENGTH-1)
@@ -162,13 +163,13 @@ in_table {
     gsub(/ COMMENT '[^']*'/, "", curr_line)
     gsub(/ CHARACTER SET [a-zA-Z0-9_]+/, "", curr_line)
     gsub(/ COLLATE [a-zA-Z0-9_]+/, "", curr_line)
-    gsub(/ UNSIGNED| unsigned/, "", curr_line)
+    gsub(/ UNSIGNED/, "", curr_line)
     gsub(/ ON UPDATE CURRENT_TIMESTAMP/, "", curr_line)
     gsub(/ DEFAULT CURRENT_TIMESTAMP/, " DEFAULT current_timestamp", curr_line)
     
-    if (curr_line ~ /AUTO_INCREMENT|auto_increment/) {
-        gsub(/AUTO_INCREMENT|auto_increment/, "", curr_line)
-        gsub(/[A-Za-z0-9_]*INT\([^)]+\)|[A-Za-z0-9_]*INT|[A-Za-z0-9_]*int/, "INTEGER PRIMARY KEY AUTOINCREMENT", curr_line)
+    if (curr_line ~ /AUTO_INCREMENT/) {
+        gsub(/AUTO_INCREMENT/, "", curr_line)
+        gsub(/[A-Za-z0-9_]*INT\([^)]+\)|[A-Za-z0-9_]*INT/, "INTEGER PRIMARY KEY AUTOINCREMENT", curr_line)
         has_pk = 1
     }
 
@@ -187,7 +188,6 @@ in_table {
 
 END {
     if (no_END) exit 1
-
     for (t in key_stmts) {
         printf "%s", key_stmts[t]
     }
