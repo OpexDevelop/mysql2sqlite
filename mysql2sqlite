@@ -3,6 +3,7 @@
 BEGIN {
     print "PRAGMA synchronous = OFF;"
     print "PRAGMA journal_mode = MEMORY;"
+    print "PRAGMA cache_size = -500000;"
     print "BEGIN TRANSACTION;"
 }
 
@@ -11,21 +12,72 @@ BEGIN {
 /^SET / { next }
 /^LOCK TABLES/ { next }
 /^UNLOCK TABLES/ { next }
-/^ALTER TABLE/ { in_alter = 1; next }
-in_alter { if (/;$/) in_alter = 0; next }
+/^(CREATE DATABASE|create database)/ { next }
 
-/^(INSERT|REPLACE) / {
-    while (match($0, /0x[0-9a-fA-F]+/)) {
-        val = substr($0, RSTART+2, RLENGTH-2)
-        $0 = substr($0, 1, RSTART-1) "X'" val "'" substr($0, RSTART+RLENGTH)
-    }
+/^(INSERT|REPLACE|insert|replace) / {
+    gsub(/\\\\/, "\\_")
     gsub(/\\'/, "''")
-    gsub(/\\"/, "\"")
     gsub(/\\n/, "\n")
     gsub(/\\r/, "\r")
     gsub(/\\t/, "\t")
-    gsub(/\\\\/, "\\")
+    gsub(/\\"/, "\"")
+    gsub(/\\\032/, "\032")
+    gsub(/\\_/, "\\")
+
+    while(match($0, /0x[0-9a-fA-F]{17,}/)) {
+        before = substr($0, 1, RSTART-1)
+        matched = substr($0, RSTART+2, RLENGTH-2)
+        after = substr($0, RSTART+RLENGTH)
+        $0 = before "'X_HEX_" matched "'" after
+    }
+    gsub(/'X_HEX_/, "'0x")
+
     print
+    next
+}
+
+/^(ALTER TABLE|alter table)/ {
+    inAlterTable = 1
+    alterStatement = $0
+    alterTableName = ""
+    alterIndexName = ""
+    isAddIndex = 0
+    next
+}
+
+inAlterTable != 0 {
+    alterStatement = alterStatement " " $0
+    
+    if (/ADD INDEX|add index/) {
+        isAddIndex = 1
+        if (match($0, /(ADD INDEX|add index) `[^`]+/)) {
+            indexMatch = substr($0, RSTART, RLENGTH)
+            if (match(indexMatch, /`[^`]+$/)) {
+                alterIndexName = substr(indexMatch, RSTART+1, RLENGTH-1)
+            }
+        }
+    }
+    
+    if (alterTableName == "" && match($0, /`[^`]+/)) {
+        alterTableName = substr($0, RSTART+1, RLENGTH-1)
+    }
+    
+    if (/;$/) {
+        if (isAddIndex && alterTableName != "" && alterIndexName != "") {
+            if (match(alterStatement, /\([^)]+\)/)) {
+                columnList = substr(alterStatement, RSTART+1, RLENGTH-2)
+                gsub(/[ \t\n\r]+/, " ", columnList)
+                gsub(/^ +| +$/, "", columnList)
+                gsub(/`/, "\"", columnList)
+                print "CREATE INDEX \"idx_" alterTableName "_" alterIndexName "\" ON \"" alterTableName "\" (" columnList ");"
+            }
+        }
+        inAlterTable = 0
+        alterStatement = ""
+        alterTableName = ""
+        alterIndexName = ""
+        isAddIndex = 0
+    }
     next
 }
 
@@ -104,6 +156,7 @@ in_table {
     gsub(/ COLLATE [a-zA-Z0-9_]+/, "", curr_line)
     gsub(/ UNSIGNED| unsigned/, "", curr_line)
     gsub(/ ON UPDATE CURRENT_TIMESTAMP/, "", curr_line)
+    gsub(/ DEFAULT CURRENT_TIMESTAMP/, " DEFAULT current_timestamp", curr_line)
     
     if (curr_line ~ /AUTO_INCREMENT|auto_increment/) {
         gsub(/AUTO_INCREMENT|auto_increment/, "", curr_line)
