@@ -1,11 +1,20 @@
 #!/usr/bin/awk -f
 
 BEGIN {
+    # Если аргументов не 2 (имя скрипта + файл дампа), то ругаемся и выходим
+    if (ARGC != 2) {
+        print "❌ Ошибка: Укажите файл MySQL дампа." > "/dev/stderr"
+        print "Использование: mysql2sqlite dump.sql" > "/dev/stderr"
+        no_END = 1 
+        exit 1     
+    }
+
     print "PRAGMA synchronous = OFF;"
     print "PRAGMA journal_mode = MEMORY;"
     print "PRAGMA cache_size = -500000;"
     print "BEGIN TRANSACTION;"
 }
+
 
 /^\/\*/ { next }
 /^--/ { next }
@@ -178,6 +187,8 @@ in_table {
 { print }
 
 END {
+    if (no_END) exit 1
+
     for (t in key_stmts) {
         printf "%s", key_stmts[t]
     }
