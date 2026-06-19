@@ -1,8 +1,6 @@
 #!/usr/bin/awk -f
 
 BEGIN {
-    IGNORECASE = 1;
-    
     if (ARGC != 2) {
         print "❌ Error: Specify MySQL dump file as the first argument." > "/dev/stderr"
         print "Usage: mysql2sqlite dump.sql" > "/dev/stderr"
@@ -23,7 +21,7 @@ BEGIN {
 /^UNLOCK TABLES/ { next }
 /^(CREATE DATABASE|create database)/ { next }
 
-/^(INSERT|REPLACE) / {
+/^(INSERT|REPLACE|insert|replace) / {
     gsub(/\\\\/, "\\_")
     gsub(/\\'/, "''")
     gsub(/\\n/, "\n")
@@ -57,9 +55,9 @@ BEGIN {
 inAlterTable != 0 {
     alterStatement = alterStatement " " $0
     
-    if (/ADD INDEX/) {
+    if (/ADD INDEX|add index/) {
         isAddIndex = 1
-        if (match($0, /ADD INDEX `[^`]+/)) {
+        if (match($0, /(ADD INDEX|add index) `[^`]+/)) {
             indexMatch = substr($0, RSTART, RLENGTH)
             if (match(indexMatch, /`[^`]+$/)) {
                 alterIndexName = substr(indexMatch, RSTART+1, RLENGTH-1)
@@ -90,7 +88,7 @@ inAlterTable != 0 {
     next
 }
 
-/^CREATE.*VIEW/ {
+/^CREATE.*VIEW|^create.*view/ {
     gsub(/ALGORITHM=[A-Za-z_]+ /, "")
     gsub(/DEFINER=[^ ]+ /, "")
     gsub(/SQL SECURITY DEFINER /, "")
@@ -106,7 +104,7 @@ in_view {
     next
 }
 
-/^CREATE.*TRIGGER/ {
+/^CREATE.*TRIGGER|^create.*trigger/ {
     gsub(/DEFINER=[^ ]+ /, "")
     print
     in_trigger = 1
@@ -120,7 +118,7 @@ in_trigger {
     next
 }
 
-/^CREATE TABLE/ {
+/^CREATE TABLE|^create table/ {
     in_table = 1
     has_pk = 0
     if (match($0, /`[^`]+/)) {
@@ -132,7 +130,7 @@ in_trigger {
 }
 
 in_table {
-    if (/^\) *(ENGINE|DEFAULT CHARSET|COLLATE|;)/ || /^\);/) {
+    if (/^\) *(ENGINE|DEFAULT CHARSET|COLLATE|engine|default charset|collate|;)/ || /^\);/) {
         gsub(/, *$/, "", prev_line)
         if (prev_line != "") print prev_line
         print ");"
@@ -142,15 +140,15 @@ in_table {
     }
 
     is_index = 0
-    if (/^ *(KEY|UNIQUE KEY|FULLTEXT KEY|SPATIAL KEY) /) {
+    if (/^ *(KEY|UNIQUE KEY|FULLTEXT KEY|SPATIAL KEY|key|unique key|fulltext key|spatial key) /) {
         if (match($0, /`[^`]+/)) idx_name = substr($0, RSTART+1, RLENGTH-1)
         if (match($0, /\([^)]+\)/)) idx_cols = substr($0, RSTART, RLENGTH)
-        is_unique = (/UNIQUE/ ? "UNIQUE " : "")
+        is_unique = (toupper($0) ~ /UNIQUE/ ? "UNIQUE " : "")
         key_stmts[table_name] = key_stmts[table_name] "CREATE " is_unique "INDEX \"idx_" table_name "_" idx_name "\" ON \"" table_name "\" " idx_cols ";\n"
         is_index = 1
     }
 
-    if (/^ *PRIMARY KEY/) {
+    if (/^ *(PRIMARY KEY|primary key)/) {
         if (has_pk) is_index = 1
         has_pk = 1
     }
@@ -160,24 +158,30 @@ in_table {
     }
 
     curr_line = $0
-    gsub(/ COMMENT '[^']*'/, "", curr_line)
-    gsub(/ CHARACTER SET [a-zA-Z0-9_]+/, "", curr_line)
-    gsub(/ COLLATE [a-zA-Z0-9_]+/, "", curr_line)
-    gsub(/ UNSIGNED/, "", curr_line)
-    gsub(/ ON UPDATE CURRENT_TIMESTAMP/, "", curr_line)
-    gsub(/ DEFAULT CURRENT_TIMESTAMP/, " DEFAULT current_timestamp", curr_line)
     
-    if (curr_line ~ /AUTO_INCREMENT/) {
-        gsub(/AUTO_INCREMENT/, "", curr_line)
-        gsub(/[A-Za-z0-9_]*INT\([^)]+\)|[A-Za-z0-9_]*INT/, "INTEGER PRIMARY KEY AUTOINCREMENT", curr_line)
+    # Жесткое и явное удаление мусора (игнорируем капризы AWK)
+    gsub(/ COMMENT '[^']*'| comment '[^']*'/, "", curr_line)
+    gsub(/ CHARACTER SET [a-zA-Z0-9_]+| character set [a-zA-Z0-9_]+/, "", curr_line)
+    gsub(/ COLLATE [a-zA-Z0-9_]+| collate [a-zA-Z0-9_]+/, "", curr_line)
+    gsub(/ UNSIGNED| unsigned/, "", curr_line)
+    gsub(/ ON UPDATE CURRENT_TIMESTAMP| on update current_timestamp/, "", curr_line)
+    gsub(/ DEFAULT CURRENT_TIMESTAMP| default current_timestamp/, " DEFAULT current_timestamp", curr_line)
+    
+    # Обрабатываем AUTO_INCREMENT и гарантированно даем ему нужный SQLite тип
+    if (curr_line ~ /AUTO_INCREMENT|auto_increment/) {
+        gsub(/ AUTO_INCREMENT| auto_increment/, "", curr_line)
+        gsub(/ PRIMARY KEY| primary key/, "", curr_line)
+        sub(/ (TINYINT|SMALLINT|MEDIUMINT|INT|BIGINT|tinyint|smallint|mediumint|int|bigint)(\([^)]+\))?/, " INTEGER PRIMARY KEY AUTOINCREMENT", curr_line)
         has_pk = 1
     }
 
-    gsub(/ENUM\([^)]+\)/, "TEXT", curr_line)
-    gsub(/SET\([^)]+\)/, "TEXT", curr_line)
-    gsub(/` [A-Za-z0-9_]*INT\([^)]+\)/, "` INTEGER", curr_line)
-    gsub(/` [A-Za-z0-9_]*INT/, "` INTEGER", curr_line)
-    gsub(/` BIT\([^)]+\)/, "` INTEGER", curr_line)
+    # Безопасно превращаем все остальные целочисленные типы в INTEGER
+    gsub(/ (TINYINT|SMALLINT|MEDIUMINT|INT|BIGINT|tinyint|smallint|mediumint|int|bigint)(\([^)]+\))?/, " INTEGER", curr_line)
+    
+    # Обрабатываем сложные типы MySQL
+    gsub(/ (ENUM|enum)\([^)]+\)/, " TEXT", curr_line)
+    gsub(/ (SET|set)\([^)]+\)/, " TEXT", curr_line)
+    gsub(/ (BIT|bit)(\([^)]+\))?/, " INTEGER", curr_line)
     
     if (prev_line != "") print prev_line
     prev_line = curr_line
