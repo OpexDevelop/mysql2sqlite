@@ -1,10 +1,9 @@
 #!/usr/bin/awk -f
 
 BEGIN {
-    # Если аргументов не 2 (имя скрипта + файл дампа), то ругаемся и выходим
     if (ARGC != 2) {
-        print "❌ Ошибка: Укажите файл MySQL дампа." > "/dev/stderr"
-        print "Использование: mysql2sqlite dump.sql" > "/dev/stderr"
+        print "❌ Error: Specify the MySQL dump file." > "/dev/stderr"
+        print "Usage: mysql2sqlite dump.sql" > "/dev/stderr"
         no_END = 1 
         exit 1     
     }
