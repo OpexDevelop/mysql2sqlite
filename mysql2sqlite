@@ -1,390 +1,132 @@
 #!/usr/bin/awk -f
 
-# Authors: @esperlu, @artemyk, @gkuenning, @dumblob
-
-# FIXME detect empty input file and issue a warning
-
-function printerr( s ){ print s | "cat >&2" }
-
 BEGIN {
-  if( ARGC != 2 ){
-    printerr( \
-      "USAGE:\n"\
-      "       mysql2sqlite dump_mysql.sql > dump_sqlite3.sql\n" \
-      "       OR\n" \
-      "       mysql2sqlite dump_mysql.sql | sqlite3 sqlite.db\n" \
-      "\n" \
-      "NOTES:\n" \
-      "       Dash in filename is not supported, because dash (-) means stdin." )
-    no_END = 1
-    exit 1
-  }
-
-  # Find INT_MAX supported by both this AWK (usually an ISO C signed int)
-  #   and SQlite.
-  # On non-8bit-based architectures, the additional bits are safely ignored.
-
-  # 8bit (lower precision should not exist)
-  s="127"
-  # "63" + 0 avoids potential parser misbehavior
-  if( (s + 0) "" == s ){ INT_MAX_HALF = "63" + 0 }
-  # 16bit
-  s="32767"
-  if( (s + 0) "" == s ){ INT_MAX_HALF = "16383" + 0 }
-  # 32bit
-  s="2147483647"
-  if( (s + 0) "" == s ){ INT_MAX_HALF = "1073741823" + 0 }
-  # 64bit (as INTEGER in SQlite3)
-  s="9223372036854775807"
-  if( (s + 0) "" == s ){ INT_MAX_HALF = "4611686018427387904" + 0 }
-#  # 128bit
-#  s="170141183460469231731687303715884105728"
-#  if( (s + 0) "" == s ){ INT_MAX_HALF = "85070591730234615865843651857942052864" + 0 }
-#  # 256bit
-#  s="57896044618658097711785492504343953926634992332820282019728792003956564819968"
-#  if( (s + 0) "" == s ){ INT_MAX_HALF = "28948022309329048855892746252171976963317496166410141009864396001978282409984" + 0 }
-#  # 512bit
-#  s="6703903964971298549787012499102923063739682910296196688861780721860882015036773488400937149083451713845015929093243025426876941405973284973216824503042048"
-#  if( (s + 0) "" == s ){ INT_MAX_HALF = "3351951982485649274893506249551461531869841455148098344430890360930441007518386744200468574541725856922507964546621512713438470702986642486608412251521024" + 0 }
-#  # 1024bit
-#  s="89884656743115795386465259539451236680898848947115328636715040578866337902750481566354238661203768010560056939935696678829394884407208311246423715319737062188883946712432742638151109800623047059726541476042502884419075341171231440736956555270413618581675255342293149119973622969239858152417678164812112068608"
-#  if( (s + 0) "" == s ){ INT_MAX_HALF = "44942328371557897693232629769725618340449424473557664318357520289433168951375240783177119330601884005280028469967848339414697442203604155623211857659868531094441973356216371319075554900311523529863270738021251442209537670585615720368478277635206809290837627671146574559986811484619929076208839082406056034304" + 0 }
-#  # higher precision probably not needed
-
-  FS=",$"
-  print "PRAGMA synchronous = OFF;"
-  print "PRAGMA journal_mode = MEMORY;"
-  print "BEGIN TRANSACTION;"
+    print "PRAGMA synchronous = OFF;"
+    print "PRAGMA journal_mode = MEMORY;"
+    print "BEGIN TRANSACTION;"
 }
 
-# historically 3 spaces separate non-argument local variables
-function bit_to_int( str_bit,   powtwo, i, res, bit, overflow ){
-  powtwo = 1
-  overflow = 0
-  # 011101 = 1*2^0 + 0*2^1 + 1*2^2 ...
-  for( i = length( str_bit ); i > 0; --i ){
-    bit = substr( str_bit, i, 1 )
-    if( overflow || ( bit == 1 && res > INT_MAX_HALF ) ){
-      printerr( \
-        NR ": WARN Bit field overflow, number truncated (LSBs saved, MSBs ignored)." )
-      break
-    }
-    res = res + bit * powtwo
-    # no warning here as it might be the last iteration
-    if( powtwo > INT_MAX_HALF ){ overflow = 1; continue }
-    powtwo = powtwo * 2
-  }
-  return res
-}
-
-# CREATE TRIGGER statements have funny commenting. Remember we are in trigger.
-/^\/\*.*(CREATE.*TRIGGER|create.*trigger)/ {
-  gsub( /^.*(TRIGGER|trigger)/, "CREATE TRIGGER" )
-  print
-  inTrigger = 1
-  next
-}
-# The end of CREATE TRIGGER has a stray comment terminator
-/(END|end) \*\/;;/ { gsub( /\*\//, "" ); print; inTrigger = 0; next }
-# The rest of triggers just get passed through
-inTrigger != 0 { print; next }
-
-# CREATE VIEW looks like a TABLE in comments
-/^\/\*.*(CREATE.*TABLE|create.*table)/ {
-  inView = 1
-  next
-}
-# end of CREATE VIEW
-/^(\).*(ENGINE|engine).*\*\/;)/ {
-  inView = 0
-  next
-}
-# content of CREATE VIEW
-inView != 0 { next }
-
-# skip comments
 /^\/\*/ { next }
+/^--/ { next }
+/^SET / { next }
+/^LOCK TABLES/ { next }
+/^UNLOCK TABLES/ { next }
+/^ALTER TABLE/ { in_alter = 1; next }
+in_alter { if (/;$/) in_alter = 0; next }
 
-# skip PARTITION statements
-/^ *[(]?(PARTITION|partition) +[^ ]+/ { next }
-
-# print all INSERT lines
-( /^ *\(/ && /\) *[,;] *$/ ) || /^(INSERT|insert|REPLACE|replace)/ {
-  prev = ""
-
-  # first replace \\ by \_ that mysqldump never generates to deal with
-  # sequnces like \\n that should be translated into \n, not \<LF>.
-  # After we convert all escapes we replace \_ by backslashes.
-  gsub( /\\\\/, "\\_" )
-
-  # single quotes are escaped by another single quote
-  gsub( /\\'/, "''" )
-  gsub( /\\n/, "\n" )
-  gsub( /\\r/, "\r" )
-  gsub( /\\"/, "\"" )
-  gsub( /\\\032/, "\032" )  # substitute char
-
-  gsub( /\\_/, "\\" )
-
-  # sqlite3 is limited to 16 significant digits of precision
-  while( match( $0, /0x[0-9a-fA-F]{17}/ ) ){
-    hexIssue = 1
-    sub( /0x[0-9a-fA-F]+/, substr( $0, RSTART, RLENGTH-1 ), $0 )
-  }
-  if( hexIssue ){
-    printerr( \
-      NR ": WARN Hex number trimmed (length longer than 16 chars)." )
-    hexIssue = 0
-  }
-  print
-  next
-}
-
-# CREATE DATABASE is not supported
-/^(CREATE DATABASE|create database)/ { next }
-
-# Handle ALTER TABLE statements
-/^(ALTER TABLE|alter table)/ {
-  inAlterTable = 1
-  alterStatement = $0
-  alterTableName = ""
-  alterIndexName = ""
-  isAddIndex = 0
-  next
-}
-
-# Continue collecting ALTER TABLE statement lines
-inAlterTable != 0 {
-  alterStatement = alterStatement " " $0
-
-  # Check if this is an ADD INDEX statement (might be on any line)
-  if( /ADD INDEX|add index/ ) {
-    isAddIndex = 1
-    # Extract index name from this line
-    if( match( $0, /(ADD INDEX|add index) `[^`]+/ ) ){
-      indexMatch = substr( $0, RSTART, RLENGTH )
-      if( match( indexMatch, /`[^`]+$/ ) ){
-        alterIndexName = substr( indexMatch, RSTART+1, RLENGTH-1 )
-      }
+/^(INSERT|REPLACE) / {
+    while (match($0, /0x[0-9a-fA-F]+/)) {
+        val = substr($0, RSTART+2, RLENGTH-2)
+        $0 = substr($0, 1, RSTART-1) "X'" val "'" substr($0, RSTART+RLENGTH)
     }
-  }
-
-  # Extract table name (might be on any line with backticks)
-  if( alterTableName == "" && match( $0, /`[^`]+/ ) ){
-    alterTableName = substr( $0, RSTART+1, RLENGTH-1 )
-  }
-
-  if( /;$/ ) {
-    # End of ALTER TABLE statement
-    if( isAddIndex && alterTableName != "" && alterIndexName != "" ) {
-      # Extract column list from the entire statement
-      if( match( alterStatement, /\([^)]+\)/ ) ){
-        columnList = substr( alterStatement, RSTART+1, RLENGTH-2 )
-        gsub( /[ \t\n\r]+/, " ", columnList )  # clean whitespace
-        gsub( /^ +| +$/, "", columnList )     # trim leading/trailing spaces
-        gsub( /`/, "\"", columnList )         # convert backticks to double quotes
-
-        # Generate CREATE INDEX statement
-        print "CREATE INDEX \"idx_" alterTableName "_" alterIndexName "\" ON \"" alterTableName "\" (" columnList ");"
-      }
-    }
-    # If it's not an ADD INDEX, we just skip it
-
-    # Reset variables
-    inAlterTable = 0
-    alterStatement = ""
-    alterTableName = ""
-    alterIndexName = ""
-    isAddIndex = 0
-  }
-  next
-}
-
-# print the CREATE line as is and capture the table name
-/^(CREATE|create)/ {
-  if( $0 ~ /IF NOT EXISTS|if not exists/ || $0 ~ /TEMPORARY|temporary/ ){
-    caseIssue = 1
-    printerr( \
-      NR ": WARN Potential case sensitivity issues with table/column naming\n" \
-      "          (see INFO at the end)." )
-  }
-  if( match( $0, /`[^`]+/ ) ){
-    tableName = substr( $0, RSTART+1, RLENGTH-1 )
-  }
-  aInc = 0
-  prev = ""
-  firstInTable = 1
-  print
-  next
-}
-
-# Replace `FULLTEXT KEY` (probably other `XXXXX KEY`)
-/^  (FULLTEXT KEY|fulltext key)/ { gsub( /[A-Za-z ]+(KEY|key)/, "  KEY" ) }
-
-# Get rid of field lengths in KEY lines
-/ (PRIMARY |primary )?(KEY|key)/ { gsub( /\([0-9]+\)/, "" ) }
-
-aInc == 1 && /PRIMARY KEY|primary key/ { next }
-
-# Replace COLLATE xxx_xxxx_xx statements with COLLATE BINARY
-/ (COLLATE|collate) [a-z0-9_]*/ { gsub( /(COLLATE|collate) [a-z0-9_]*/, "COLLATE BINARY" ) }
-
-# Handle closing paren of multi-line constraints
-/^   *\)/ {
-  if( prev ){
-    if( firstInTable ){
-      print prev
-      firstInTable = 0
-    }
-    else {
-      if( firstInConstraint ){
-        print prev
-        firstInConstraint = 0
-      }
-      else {
-        print "," prev
-      }
-    }
-  }
-  print
-  prev = ""
-  firstInConstraint = 0
-  next
-}
-
-# Print all fields definition lines except the `KEY` lines.
-/^  / && !/^(  (KEY|key)|\);)/ {
-  if( match( $0, /[^"`]AUTO_INCREMENT|auto_increment[^"`]/) ){
-    aInc = 1
-    gsub( /PRIMARY KEY/, "" )
-    gsub( /AUTO_INCREMENT|auto_increment/, "PRIMARY KEY AUTOINCREMENT" )
-  }
-  gsub( /(UNIQUE KEY|unique key) (`.*`|".*") /, "UNIQUE " )
-  gsub( /(CHARACTER SET|character set) [^ ]+[ ,]/, "" )
-  # FIXME
-  #   CREATE TRIGGER [UpdateLastTime]
-  #   AFTER UPDATE
-  #   ON Package
-  #   FOR EACH ROW
-  #   BEGIN
-  #   UPDATE Package SET LastUpdate = CURRENT_TIMESTAMP WHERE ActionId = old.ActionId;
-  #   END
-  gsub( /(ON|on) (UPDATE|update) (CURRENT_TIMESTAMP|current_timestamp)(\(\))?/, "" )
-  gsub( /(DEFAULT|default) (CURRENT_TIMESTAMP|current_timestamp)(\(\))?/, "DEFAULT current_timestamp")
-  gsub( /(COLLATE|collate) [^ ]+ /, "" )
-  gsub( /(ENUM|enum)[^)]+\)/, "text " )
-  gsub( /(SET|set)\([^)]+\)/, "text " )
-  gsub( /UNSIGNED|unsigned/, "" )
-  gsub( /_utf8mb3/, "" )
-  gsub( /` [^ ]*(INT|int|BIT|bit)[^ ]*/, "` integer" )
-  gsub( /" [^ ]*(INT|int|BIT|bit)[^ ]*/, "\" integer" )
-  ere_bit_field = "[bB]'[10]+'"
-  if( match($0, ere_bit_field) ){
-    sub( ere_bit_field, bit_to_int( substr( $0, RSTART +2, RLENGTH -2 -1 ) ) )
-  }
-
-  # remove USING BTREE and other suffixes for USING, for example: "UNIQUE KEY
-  # `hostname_domain` (`hostname`,`domain`) USING BTREE,"
-  gsub( / USING [^, ]+/, "" )
-
-  # field comments are not supported
-  gsub( / (COMMENT|comment).+$/, "" )
-  # Get commas off end of line
-  gsub( /,.?$/, "" )
-
-  if( prev ){
-    if( firstInTable ){
-      print prev
-      firstInTable = 0
-    }
-    else {
-      # Don't add comma if first item in constraint
-      if( firstInConstraint ){
-        print prev
-        firstInConstraint = 0
-      }
-      else {
-        print "," prev
-      }
-    }
-
-    # Check if what we just printed opens a constraint
-    checkPrev = prev
-    openParens = gsub( /\(/, "(", checkPrev )
-    closeParens = gsub( /\)/, ")", checkPrev )
-
-    if( match( prev, /(PRIMARY KEY|primary key|FOREIGN KEY|foreign key|UNIQUE|unique|CHECK|check)\(/ ) ){
-      if( openParens > closeParens ){
-        firstInConstraint = 1
-      }
-    }
-  }
-  else {
-    # FIXME check if this is correct in all cases
-    if( match( $1,
-        /(CONSTRAINT|constraint) ["].*["] (FOREIGN KEY|foreign key)/ ) ){
-      print ","
-    }
-  }
-
-  prev = $1
-}
-
-/ ENGINE| engine/ {
-  if( prev ){
-    if( firstInTable ){
-      print prev
-      firstInTable = 0
-    }
-    else {
-      print "," prev
-    }
-  }
-  prev=""
-  print ");"
-  next
-}
-# `KEY` lines are extracted from the `CREATE` block and stored in array for later print
-# in a separate `CREATE KEY` command. The index name is prefixed by the table name to
-# avoid a sqlite error for duplicate index name.
-/^(  (KEY|key)|\);)/ {
-  if( prev ){
-    if( firstInTable ){
-      print prev
-      firstInTable = 0
-    }
-    else {
-      print "," prev
-    }
-  }
-  prev = ""
-  if( $0 == ");" ){
+    gsub(/\\'/, "''")
+    gsub(/\\"/, "\"")
+    gsub(/\\n/, "\n")
+    gsub(/\\r/, "\r")
+    gsub(/\\t/, "\t")
+    gsub(/\\\\/, "\\")
     print
-  }
-  else {
-    if( match( $0, /`[^`]+/ ) ){
-      indexName = substr( $0, RSTART+1, RLENGTH-1 )
-    }
-    if( match( $0, /\([^()]+/ ) ){
-      indexKey = substr( $0, RSTART+1, RLENGTH-1 )
-    }
-    # idx_ prefix to avoid name clashes (they really happen!)
-    key[tableName] = key[tableName] "CREATE INDEX \"idx_" \
-       tableName "_" indexName "\" ON \"" tableName "\" (" indexKey ");\n"
-  }
+    next
 }
+
+/^CREATE.*VIEW/ {
+    gsub(/ALGORITHM=[A-Za-z_]+ /, "")
+    gsub(/DEFINER=[^ ]+ /, "")
+    gsub(/SQL SECURITY DEFINER /, "")
+    print
+    in_view = 1
+    if (/;$/) in_view = 0
+    next
+}
+
+in_view {
+    print
+    if (/;$/) in_view = 0
+    next
+}
+
+/^CREATE.*TRIGGER/ {
+    gsub(/DEFINER=[^ ]+ /, "")
+    print
+    in_trigger = 1
+    if (/;$/ && !/BEGIN/ && !/END/) in_trigger = 0
+    next
+}
+
+in_trigger {
+    print
+    if (/END;/ || /END \*\//) in_trigger = 0
+    next
+}
+
+/^CREATE TABLE/ {
+    in_table = 1
+    has_pk = 0
+    if (match($0, /`[^`]+/)) {
+        table_name = substr($0, RSTART+1, RLENGTH-1)
+    }
+    print
+    prev_line = ""
+    next
+}
+
+in_table {
+    if (/^\) *(ENGINE|DEFAULT CHARSET|COLLATE|;)/ || /^\);/) {
+        gsub(/, *$/, "", prev_line)
+        if (prev_line != "") print prev_line
+        print ");"
+        in_table = 0
+        prev_line = ""
+        next
+    }
+
+    is_index = 0
+    if (/^ *(KEY|UNIQUE KEY|FULLTEXT KEY|SPATIAL KEY) /) {
+        if (match($0, /`[^`]+/)) idx_name = substr($0, RSTART+1, RLENGTH-1)
+        if (match($0, /\([^)]+\)/)) idx_cols = substr($0, RSTART, RLENGTH)
+        is_unique = (/UNIQUE/ ? "UNIQUE " : "")
+        key_stmts[table_name] = key_stmts[table_name] "CREATE " is_unique "INDEX \"idx_" table_name "_" idx_name "\" ON \"" table_name "\" " idx_cols ";\n"
+        is_index = 1
+    }
+
+    if (/^ *PRIMARY KEY/) {
+        if (has_pk) is_index = 1
+        has_pk = 1
+    }
+
+    if (is_index) {
+        next
+    }
+
+    curr_line = $0
+    gsub(/ COMMENT '[^']*'/, "", curr_line)
+    gsub(/ CHARACTER SET [a-zA-Z0-9_]+/, "", curr_line)
+    gsub(/ COLLATE [a-zA-Z0-9_]+/, "", curr_line)
+    gsub(/ UNSIGNED| unsigned/, "", curr_line)
+    gsub(/ ON UPDATE CURRENT_TIMESTAMP/, "", curr_line)
+    
+    if (curr_line ~ /AUTO_INCREMENT|auto_increment/) {
+        gsub(/AUTO_INCREMENT|auto_increment/, "", curr_line)
+        gsub(/[A-Za-z0-9_]*INT\([^)]+\)|[A-Za-z0-9_]*INT|[A-Za-z0-9_]*int/, "INTEGER PRIMARY KEY AUTOINCREMENT", curr_line)
+        has_pk = 1
+    }
+
+    gsub(/ENUM\([^)]+\)/, "TEXT", curr_line)
+    gsub(/SET\([^)]+\)/, "TEXT", curr_line)
+    gsub(/` [A-Za-z0-9_]*INT\([^)]+\)/, "` INTEGER", curr_line)
+    gsub(/` [A-Za-z0-9_]*INT/, "` INTEGER", curr_line)
+    gsub(/` BIT\([^)]+\)/, "` INTEGER", curr_line)
+    
+    if (prev_line != "") print prev_line
+    prev_line = curr_line
+    next
+}
+
+{ print }
 
 END {
-  if( no_END ){ exit 1}
-  # print all KEY creation lines.
-  for( table in key ){ printf key[table] }
-
-  print "END TRANSACTION;"
-
-  if( caseIssue ){
-    printerr( \
-      "INFO Pure sqlite identifiers are case insensitive (even if quoted\n" \
-      "     or if ASCII) and doesnt cross-check TABLE and TEMPORARY TABLE\n" \
-      "     identifiers. Thus expect errors like \"table T has no column named F\".")
-  }
+    for (t in key_stmts) {
+        printf "%s", key_stmts[t]
+    }
+    print "COMMIT;"
 }
